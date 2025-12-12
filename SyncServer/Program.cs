@@ -1,21 +1,43 @@
+using Serilog;
 using SyncServer.Infrastructure;
+using SyncServer.Logging;
 using SyncServer.Services;
 
-var builder = WebApplication.CreateBuilder(args);
+Log.Logger = SerilogConfigurator.CreateBootstrapLogger();
 
-// 載入設定並註冊 DI
-builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection(StorageOptions.SectionName));
-builder.Services.Configure<ApiKeyOptions>(builder.Configuration.GetSection(ApiKeyOptions.SectionName));
-builder.Services.AddSingleton<ApiKeyValidator>();
-builder.Services.AddSingleton<PathMapper>();
-builder.Services.AddSingleton<FileSyncService>();
-builder.Services.AddControllers();
+try
+{
+    var builder = WebApplication.CreateBuilder(args);
 
-var app = builder.Build();
+    builder.Host.UseSerilog((context, _, configuration) =>
+    {
+        var options = context.Configuration.GetSection(AppLoggingOptions.SectionName).Get<AppLoggingOptions>() ?? new();
+        SerilogConfigurator.Configure(configuration, options);
+    });
 
-// 強制 HTTPS 導向
-app.UseHttpsRedirection();
-app.UseAuthorization();
-app.MapControllers();
+    // 載入設定並註冊 DI
+    builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection(StorageOptions.SectionName));
+    builder.Services.Configure<ApiKeyOptions>(builder.Configuration.GetSection(ApiKeyOptions.SectionName));
+    builder.Services.Configure<AppLoggingOptions>(builder.Configuration.GetSection(AppLoggingOptions.SectionName));
+    builder.Services.AddSingleton<ApiKeyValidator>();
+    builder.Services.AddSingleton<PathMapper>();
+    builder.Services.AddSingleton<FileSyncService>();
+    builder.Services.AddControllers();
 
-app.Run();
+    var app = builder.Build();
+
+    app.UseHttpsRedirection();
+    app.UseAuthorization();
+    app.MapControllers();
+
+    Log.Information("SyncServer 啟動完成，開始接受請求");
+    app.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "SyncServer 啟動失敗");
+}
+finally
+{
+    Log.CloseAndFlush();
+}

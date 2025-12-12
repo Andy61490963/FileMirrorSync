@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
+using Serilog;
 using SyncClient.Infrastructure;
+using SyncClient.Logging;
 using SyncClient.Services;
 
 namespace SyncClient;
@@ -12,29 +14,61 @@ public static class Program
     /// </summary>
     public static async Task Main(string[] args)
     {
-        var settings = LoadSettings();
-        var runner = new SyncRunner(settings);
-        using var cts = new CancellationTokenSource();
+        var configuration = LoadConfiguration();
+        var loggingOptions = configuration.GetSection(AppLoggingOptions.SectionName).Get<AppLoggingOptions>() ?? new();
 
-        Console.CancelKeyPress += (_, e) =>
+        Log.Logger = SerilogConfigurator.CreateBootstrapLogger(loggingOptions.ApplicationName);
+
+        try
         {
-            e.Cancel = true;
-            cts.Cancel();
-        };
+            var loggerConfiguration = new LoggerConfiguration();
+            SerilogConfigurator.Configure(loggerConfiguration, loggingOptions);
+            Log.Logger = loggerConfiguration.CreateLogger();
 
-        await runner.RunAsync(cts.Token);
-        Console.WriteLine("同步完成");
+            var settings = LoadSettings(configuration);
+            var runner = new SyncRunner(settings, Log.Logger);
+            using var cts = new CancellationTokenSource();
+
+            Console.CancelKeyPress += (_, e) =>
+            {
+                e.Cancel = true;
+                cts.Cancel();
+            };
+
+            Log.Information("同步程序開始，ClientId: {ClientId}, Root: {RootPath}", settings.ClientId, settings.RootPath);
+
+            await runner.RunAsync(cts.Token);
+
+            Log.Information("同步完成");
+        }
+        catch (OperationCanceledException)
+        {
+            Log.Warning("同步程序已取消");
+        }
+        catch (Exception ex)
+        {
+            Log.Fatal(ex, "同步程序發生未預期錯誤");
+        }
+        finally
+        {
+            Log.CloseAndFlush();
+        }
     }
 
-    private static SyncSettings LoadSettings()
+    private static IConfigurationRoot LoadConfiguration()
     {
         var config = new ConfigurationBuilder()
             .SetBasePath(AppContext.BaseDirectory)
             .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
             .Build();
 
+        return config;
+    }
+
+    private static SyncSettings LoadSettings(IConfiguration configuration)
+    {
         var settings = new SyncSettings();
-        config.Bind(settings);
+        configuration.Bind(settings);
         return settings;
     }
 }

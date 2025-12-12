@@ -35,3 +35,9 @@
 - **Hash 計算成本**：僅在 `size` 或 `lastWriteUtc` 變更時重算；狀態檔記錄 hash，避免每次全量計算。
 - **可測性**：服務層為純邏輯，便於以單元測試覆蓋 Diff 與路徑驗證。未來可將 chunk 儲存抽象化以支援雲端儲存。
 - **可重用性**：`SyncRunner`、`ManifestBuilder`、`FileSyncService` 皆為可注入的獨立元件，方便改為 Windows Service 或 WebJob 執行。
+
+## Logging 與可觀測性
+- Server 與 Client 均使用 Serilog，啟動時先建立 Console bootstrap logger，再依 `AppLogging` 設定決定最低層級、檔案與 Seq Sink。
+- 檔案 Sink 以每日滾動檔案與大小上限控制體積，失敗時會寫入 `serilog-selflog.txt` 自我診斷。
+- 主要業務流程（Manifest 比對、chunk 上傳、合併、刪除、狀態檔存取）皆有資訊層級紀錄；Hash 重用與重算則以 Debug/Information 區分成本與行為。
+- 設定檔自訂：`AppLogging.ApplicationName` 用於標記來源，`File` 與 `Seq` 區段可獨立啟用/停用並調整保留天數與傳送週期。

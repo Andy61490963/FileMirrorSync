@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text;
+using Serilog;
 using SyncClient.Infrastructure;
 using SyncClient.Models;
 
@@ -14,8 +15,9 @@ public class SyncRunner
     private readonly HttpClient _httpClient;
     private readonly SyncStateStore _stateStore;
     private readonly ManifestBuilder _manifestBuilder;
+    private readonly ILogger _logger;
 
-    public SyncRunner(SyncSettings settings)
+    public SyncRunner(SyncSettings settings, ILogger logger)
     {
         _settings = settings;
         _httpClient = new HttpClient
@@ -23,8 +25,9 @@ public class SyncRunner
             BaseAddress = new Uri(settings.ServerBaseUrl)
         };
         _httpClient.DefaultRequestHeaders.Add("X-Api-Key", settings.ApiKey);
-        _stateStore = new SyncStateStore(settings.StateFile);
-        _manifestBuilder = new ManifestBuilder(settings.RootPath);
+        _logger = logger.ForContext<SyncRunner>();
+        _stateStore = new SyncStateStore(settings.StateFile, _logger);
+        _manifestBuilder = new ManifestBuilder(settings.RootPath, _logger);
     }
 
     /// <summary>
@@ -35,6 +38,8 @@ public class SyncRunner
         var previous = _stateStore.Load();
         var files = _manifestBuilder.Build(previous);
 
+        _logger.Information("Manifest 建立完成，共 {Count} 筆項目，開始比對差異", files.Count);
+
         var manifest = new ManifestRequest
         {
             ClientId = _settings.ClientId,
@@ -42,11 +47,13 @@ public class SyncRunner
         };
 
         var diff = await PostManifestAsync(manifest, ct);
+        _logger.Information("伺服器回傳差異，需上傳 {Upload} 筆、需刪除 {Delete} 筆", diff.Upload.Count, diff.Delete.Count);
         await UploadFilesAsync(diff.Upload, files, ct);
         await DeleteFilesAsync(diff.Delete, ct);
 
         var newState = files.ToDictionary(f => f.Path, f => f, StringComparer.OrdinalIgnoreCase);
         _stateStore.Save(newState);
+        _logger.Information("狀態檔已更新，檔案數: {Count}", newState.Count);
     }
 
     /// <summary>
@@ -56,6 +63,7 @@ public class SyncRunner
     {
         var response = await _httpClient.PostAsJsonAsync("api/sync/manifest", request, ct);
         response.EnsureSuccessStatusCode();
+        _logger.Information("Manifest 已送出，等待差異回應");
         return (await response.Content.ReadFromJsonAsync<ManifestDiffResponse>(cancellationToken: ct))!;
     }
 
@@ -81,6 +89,7 @@ public class SyncRunner
                 var url = $"api/sync/files/{base64Path}/chunks/{index}?clientId={_settings.ClientId}";
                 var response = await _httpClient.PutAsync(url, content, ct);
                 response.EnsureSuccessStatusCode();
+                _logger.Information("上傳 chunk 成功，檔案: {File}，序號: {Index}/{Total}", relative, index + 1, totalChunks);
                 index++;
             }
 
@@ -93,6 +102,7 @@ public class SyncRunner
             };
             var completeResponse = await _httpClient.PostAsJsonAsync($"api/sync/files/{base64Path}/complete", completeRequest, ct);
             completeResponse.EnsureSuccessStatusCode();
+            _logger.Information("檔案上傳完成並驗證，檔案: {File}", relative);
         }
     }
 
@@ -103,6 +113,7 @@ public class SyncRunner
     {
         if (!deleteList.Any())
         {
+            _logger.Information("無檔案需要刪除");
             return;
         }
 
@@ -114,5 +125,6 @@ public class SyncRunner
 
         var response = await _httpClient.PostAsJsonAsync("api/sync/delete", request, ct);
         response.EnsureSuccessStatusCode();
+        _logger.Information("刪除請求已完成，共刪除 {Count} 筆", request.Paths.Count);
     }
 }

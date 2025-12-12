@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using SyncServer.Infrastructure;
 using SyncServer.Models;
 using SyncServer.Services;
+using Microsoft.Extensions.Logging;
 
 namespace SyncServer.Controllers;
 
@@ -11,11 +12,13 @@ public class SyncController : ControllerBase
 {
     private readonly ApiKeyValidator _apiKeyValidator;
     private readonly FileSyncService _fileSyncService;
+    private readonly ILogger<SyncController> _logger;
 
-    public SyncController(ApiKeyValidator apiKeyValidator, FileSyncService fileSyncService)
+    public SyncController(ApiKeyValidator apiKeyValidator, FileSyncService fileSyncService, ILogger<SyncController> logger)
     {
         _apiKeyValidator = apiKeyValidator;
         _fileSyncService = fileSyncService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -26,10 +29,12 @@ public class SyncController : ControllerBase
     {
         if (!_apiKeyValidator.IsValid(request.ClientId, apiKey))
         {
+            _logger.LogWarning("Manifest 驗證失敗，ClientId: {ClientId}", request.ClientId);
             return Unauthorized();
         }
 
         var result = _fileSyncService.Diff(request.ClientId, request.Files);
+        _logger.LogInformation("回傳 Manifest 差異，ClientId: {ClientId}", request.ClientId);
         return Ok(result);
     }
 
@@ -41,10 +46,12 @@ public class SyncController : ControllerBase
     {
         if (!_apiKeyValidator.IsValid(clientId, apiKey))
         {
+            _logger.LogWarning("Chunk 驗證失敗，ClientId: {ClientId}, Index: {Index}", clientId, index);
             return Unauthorized();
         }
 
         await _fileSyncService.SaveChunkAsync(clientId, base64Path, index, Request.Body, ct);
+        _logger.LogInformation("接收 chunk 成功，ClientId: {ClientId}, Index: {Index}", clientId, index);
         return NoContent();
     }
 
@@ -56,10 +63,12 @@ public class SyncController : ControllerBase
     {
         if (!_apiKeyValidator.IsValid(request.ClientId, apiKey))
         {
+            _logger.LogWarning("完成上傳驗證失敗，ClientId: {ClientId}", request.ClientId);
             return Unauthorized();
         }
 
         await _fileSyncService.CompleteUploadAsync(request.ClientId, base64Path, request, ct);
+        _logger.LogInformation("完成檔案合併，ClientId: {ClientId}, Path: {Path}", request.ClientId, base64Path);
         return NoContent();
     }
 
@@ -71,10 +80,12 @@ public class SyncController : ControllerBase
     {
         if (!_apiKeyValidator.IsValid(request.ClientId, apiKey))
         {
+            _logger.LogWarning("刪除請求驗證失敗，ClientId: {ClientId}", request.ClientId);
             return Unauthorized();
         }
 
         _fileSyncService.DeleteFiles(request.ClientId, request.Paths);
+        _logger.LogInformation("刪除請求完成，ClientId: {ClientId}，數量: {Count}", request.ClientId, request.Paths.Count);
         return NoContent();
     }
 }

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using SyncServer.Infrastructure;
 using SyncServer.Models;
 
@@ -11,10 +12,12 @@ namespace SyncServer.Services;
 public class FileSyncService
 {
     private readonly PathMapper _pathMapper;
+    private readonly ILogger<FileSyncService> _logger;
 
-    public FileSyncService(PathMapper pathMapper)
+    public FileSyncService(PathMapper pathMapper, ILogger<FileSyncService> logger)
     {
         _pathMapper = pathMapper;
+        _logger = logger;
     }
 
     /// <summary>
@@ -49,11 +52,15 @@ public class FileSyncService
 
         var delete = serverLookup.Keys.Except(clientLookup.Keys, StringComparer.OrdinalIgnoreCase).ToList();
 
-        return new ManifestDiffResponse
+        var response = new ManifestDiffResponse
         {
             Upload = upload,
             Delete = delete
         };
+
+        _logger.LogInformation("比較 Manifest 完成，Client: {ClientId}，需上傳 {UploadCount} 筆，需刪除 {DeleteCount} 筆", clientId, response.Upload.Count, response.Delete.Count);
+
+        return response;
     }
 
     /// <summary>
@@ -68,6 +75,8 @@ public class FileSyncService
 
         await using var fs = new FileStream(safeTempFile, FileMode.Create, FileAccess.Write, FileShare.None);
         await content.CopyToAsync(fs, ct);
+
+        _logger.LogInformation("已儲存 chunk，Client: {ClientId}，檔案: {RelativePath}，索引: {ChunkIndex}", clientId, relativePath, index);
     }
 
     /// <summary>
@@ -118,6 +127,8 @@ public class FileSyncService
 
         File.Move(tempFile, targetPath, true);
         CleanupChunks(chunkFiles);
+
+        _logger.LogInformation("檔案合併完成，Client: {ClientId}，目標檔案: {RelativePath}，大小: {Size} bytes", clientId, relativePath, request.ExpectedSize);
     }
 
     /// <summary>
@@ -125,7 +136,9 @@ public class FileSyncService
     /// </summary>
     public void DeleteFiles(string clientId, IEnumerable<string> paths)
     {
-        foreach (var path in paths)
+        var targetList = paths.ToList();
+
+        foreach (var path in targetList)
         {
             var target = _pathMapper.GetSafeAbsolutePath(clientId, DecodePath(path));
             if (File.Exists(target))
@@ -133,6 +146,8 @@ public class FileSyncService
                 File.Delete(target);
             }
         }
+
+        _logger.LogInformation("刪除檔案完成，Client: {ClientId}，檔案數: {Count}", clientId, targetList.Count);
     }
 
     private IEnumerable<FileEntry> EnumerateServerFiles(string root)

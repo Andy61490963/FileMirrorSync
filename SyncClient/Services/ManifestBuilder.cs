@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Serilog;
 using SyncClient.Models;
 
 namespace SyncClient.Services;
@@ -9,10 +10,12 @@ namespace SyncClient.Services;
 public class ManifestBuilder
 {
     private readonly string _root;
+    private readonly ILogger _logger;
 
-    public ManifestBuilder(string root)
+    public ManifestBuilder(string root, ILogger logger)
     {
         _root = root;
+        _logger = logger.ForContext<ManifestBuilder>();
     }
 
     /// <summary>
@@ -37,15 +40,18 @@ public class ManifestBuilder
             if (previous.TryGetValue(relative, out var prev) && prev.Size == entry.Size && prev.LastWriteTime == entry.LastWriteTime)
             {
                 entry.Sha256 = prev.Sha256;
+                _logger.Debug("沿用既有 Hash，檔案: {File}", relative);
             }
             else
             {
                 entry.Sha256 = ComputeSha256(path);
+                _logger.Information("重新計算 Hash，檔案: {File}", relative);
             }
 
             entries.Add(entry);
         }
 
+        _logger.Information("Manifest 掃描完成，總檔案數: {Count}", entries.Count);
         return entries;
     }
 
