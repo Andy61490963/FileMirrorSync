@@ -5,10 +5,10 @@ namespace SyncClient.Infrastructure;
 /// </summary>
 public class SyncSettings
 {
-    public string ClientId { get; set; } = "demo";
-    public string ApiKey { get; set; } = "demo-secret-key";
-    public string ServerBaseUrl { get; set; } = "https://localhost";
-    public string RootPath { get; set; } = "/data/source";
-    public string StateFile { get; set; } = "sync-state.json";
-    public int ChunkSize { get; set; } = 8 * 1024 * 1024;
+    public string ClientId { get; set; }
+    public string ApiKey { get; set; }
+    public string ServerBaseUrl { get; set; } 
+    public string RootPath { get; set; }
+    public string StateFile { get; set; }
+    public int ChunkSize { get; set; }
 }

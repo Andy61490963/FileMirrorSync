@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
 using SyncClient.Infrastructure;
 using SyncClient.Services;
 
@@ -27,13 +28,13 @@ public static class Program
 
     private static SyncSettings LoadSettings()
     {
-        const string file = "appsettings.json";
-        if (!File.Exists(file))
-        {
-            return new SyncSettings();
-        }
+        var config = new ConfigurationBuilder()
+            .SetBasePath(AppContext.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+            .Build();
 
-        var json = File.ReadAllText(file);
-        return JsonSerializer.Deserialize<SyncSettings>(json) ?? new SyncSettings();
+        var settings = new SyncSettings();
+        config.Bind(settings);
+        return settings;
     }
 }

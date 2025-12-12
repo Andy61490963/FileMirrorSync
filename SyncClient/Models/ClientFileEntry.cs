@@ -7,6 +7,6 @@ public class ClientFileEntry
 {
     public string Path { get; set; } = string.Empty;
     public long Size { get; set; }
-    public DateTime LastWriteUtc { get; set; }
+    public DateTime LastWriteTime { get; set; }
     public string? Sha256 { get; set; }
 }

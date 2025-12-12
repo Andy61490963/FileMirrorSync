@@ -30,11 +30,11 @@ public class ManifestBuilder
             {
                 Path = relative,
                 Size = info.Length,
-                LastWriteUtc = info.LastWriteTimeUtc,
+                LastWriteTime = info.LastWriteTime,
                 Sha256 = null
             };
 
-            if (previous.TryGetValue(relative, out var prev) && prev.Size == entry.Size && prev.LastWriteUtc == entry.LastWriteUtc)
+            if (previous.TryGetValue(relative, out var prev) && prev.Size == entry.Size && prev.LastWriteTime == entry.LastWriteTime)
             {
                 entry.Sha256 = prev.Sha256;
             }
