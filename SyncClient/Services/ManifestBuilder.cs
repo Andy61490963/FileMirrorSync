@@ -10,9 +10,9 @@ namespace SyncClient.Services;
 public class ManifestBuilder
 {
     private readonly string _root;
-    private readonly ILogger _logger;
+    private readonly Serilog.ILogger _logger;
 
-    public ManifestBuilder(string root, ILogger logger)
+    public ManifestBuilder(string root, Serilog.ILogger logger)
     {
         _root = root;
         _logger = logger.ForContext<ManifestBuilder>();

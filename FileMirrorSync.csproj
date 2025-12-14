@@ -7,4 +7,10 @@
     <UserSecretsId>dotnet-FileMirrorSync-1dcdf000-cb58-453d-9127-11013ebda029</UserSecretsId>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Serilog.Extensions.Logging" Version="8.0.0" />
+    <PackageReference Include="Serilog.Sinks.Seq" Version="8.0.0" />
+  </ItemGroup>
+
 </Project>

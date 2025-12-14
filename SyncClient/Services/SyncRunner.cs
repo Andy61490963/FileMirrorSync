@@ -15,9 +15,9 @@ public class SyncRunner
     private readonly HttpClient _httpClient;
     private readonly SyncStateStore _stateStore;
     private readonly ManifestBuilder _manifestBuilder;
-    private readonly ILogger _logger;
+    private readonly Serilog.ILogger _logger;
 
-    public SyncRunner(SyncSettings settings, ILogger logger)
+    public SyncRunner(SyncSettings settings, Serilog.ILogger logger)
     {
         _settings = settings;
         _httpClient = new HttpClient
@@ -75,7 +75,7 @@ public class SyncRunner
         foreach (var relative in uploadList)
         {
             var entry = files.First(f => string.Equals(f.Path, relative, StringComparison.OrdinalIgnoreCase));
-            var base64Path = Convert.ToBase64String(Encoding.UTF8.GetBytes(relative));
+            var base64Path = ToBase64Url(relative);
             var filePath = Path.Combine(_settings.RootPath, relative);
 
             using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -87,8 +87,21 @@ public class SyncRunner
             {
                 using var content = new ByteArrayContent(buffer, 0, read);
                 var url = $"api/sync/files/{base64Path}/chunks/{index}?clientId={_settings.ClientId}";
-                var response = await _httpClient.PutAsync(url, content, ct);
-                response.EnsureSuccessStatusCode();
+                var resp = await _httpClient.PutAsync(url, content, ct);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    var body = await resp.Content.ReadAsStringAsync(ct);
+
+                    _logger.Error(
+                        "Upload failed. Status={StatusCode} Url={Url} Body={Body}",
+                        (int)resp.StatusCode,
+                        resp.RequestMessage?.RequestUri?.ToString(),
+                        body
+                    );
+
+                    resp.EnsureSuccessStatusCode();
+                }
+                
                 _logger.Information("上傳 chunk 成功，檔案: {File}，序號: {Index}/{Total}", relative, index + 1, totalChunks);
                 index++;
             }
@@ -100,12 +113,33 @@ public class SyncRunner
                 Sha256 = entry.Sha256,
                 ChunkCount = totalChunks
             };
-            var completeResponse = await _httpClient.PostAsJsonAsync($"api/sync/files/{base64Path}/complete", completeRequest, ct);
-            completeResponse.EnsureSuccessStatusCode();
+            var resp1 = await _httpClient.PostAsJsonAsync($"api/sync/files/{base64Path}/complete", completeRequest, ct);
+            if (!resp1.IsSuccessStatusCode)
+            {
+                var body = await resp1.Content.ReadAsStringAsync(ct);
+
+                _logger.Error(
+                    "Upload failed. Status={StatusCode} Url={Url} Body={Body}",
+                    (int)resp1.StatusCode,
+                    resp1.RequestMessage?.RequestUri?.ToString(),
+                    body
+                );
+
+                resp1.EnsureSuccessStatusCode();
+            }
             _logger.Information("檔案上傳完成並驗證，檔案: {File}", relative);
         }
     }
 
+    private static string ToBase64Url(string input)
+    {
+        var bytes = Encoding.UTF8.GetBytes(input);
+        var base64 = Convert.ToBase64String(bytes);
+
+        // Base64Url: '+' -> '-', '/' -> '_', 去掉 '=' padding
+        return base64.Replace('+', '-').Replace('/', '_').TrimEnd('=');
+    }
+    
     /// <summary>
     /// 發送刪除請求，使 Server 鏡像同步。
     /// </summary>

@@ -21,7 +21,6 @@ public static class SerilogConfigurator
     {
         return new LoggerConfiguration()
             .MinimumLevel.Information()
-            .WriteTo.Console()
             .CreateLogger();
     }
 
@@ -40,9 +39,7 @@ public static class SerilogConfigurator
 
         loggerConfiguration
             .Enrich.FromLogContext()
-            .Enrich.WithProperty("Application", options.ApplicationName)
-            .Enrich.WithMachineName()
-            .Enrich.WithEnvironmentName();
+            .Enrich.WithProperty("Application", options.ApplicationName);
 
         if (options.File.Enabled)
         {

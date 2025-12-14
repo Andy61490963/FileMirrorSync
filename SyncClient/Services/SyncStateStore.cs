@@ -10,14 +10,14 @@ namespace SyncClient.Services;
 public class SyncStateStore
 {
     private readonly string _stateFile;
-    private readonly ILogger _logger;
+    private readonly Serilog.ILogger _logger;
 
     public SyncStateStore(string stateFile)
         : this(stateFile, Log.ForContext<SyncStateStore>())
     {
     }
 
-    public SyncStateStore(string stateFile, ILogger logger)
+    public SyncStateStore(string stateFile, Serilog.ILogger logger)
     {
         _stateFile = stateFile;
         _logger = logger.ForContext<SyncStateStore>();
@@ -31,6 +31,7 @@ public class SyncStateStore
         if (!File.Exists(_stateFile))
         {
             _logger.Information("狀態檔不存在，將建立新的檔案：{File}", _stateFile);
+            _logger.Information("CurrentDirectory = {Dir}", Environment.CurrentDirectory);
             return new Dictionary<string, ClientFileEntry>(StringComparer.OrdinalIgnoreCase);
         }
 

@@ -57,7 +57,7 @@ public class SeqLoggingOptions
     /// <summary>
     /// 是否啟用 Seq 傳送。
     /// </summary>
-    public bool Enabled { get; set; };
+    public bool Enabled { get; set; }
 
     /// <summary>
     /// Seq 伺服器 URL。
