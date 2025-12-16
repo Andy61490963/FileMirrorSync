@@ -36,20 +36,21 @@ public class FileSyncService
         {
             if (!serverLookup.TryGetValue(kv.Key, out var serverEntry))
             {
-                upload.Add(kv.Key);
+                upload.Add(kv.Key); // server 沒有 → 要上傳
                 continue;
             }
 
             if (serverEntry.Size != kv.Value.Size || serverEntry.LastWriteUtc != kv.Value.LastWriteUtc)
             {
-                upload.Add(kv.Key);
+                upload.Add(kv.Key); // 大小或時間不同 → 要上傳
             }
             else if (!string.IsNullOrEmpty(kv.Value.Sha256) && !string.Equals(kv.Value.Sha256, serverEntry.Sha256, StringComparison.OrdinalIgnoreCase))
             {
-                upload.Add(kv.Key);
+                upload.Add(kv.Key); // hash 不同 → 要上傳
             }
         }
 
+        // Server 有、Client 沒有 → Server 端多出來的檔案要刪（鏡像同步）
         var delete = serverLookup.Keys.Except(clientLookup.Keys, StringComparer.OrdinalIgnoreCase).ToList();
 
         var response = new ManifestDiffResponse
@@ -87,8 +88,16 @@ public class FileSyncService
         var relativePath = DecodePath(base64Path);
         var targetPath = _pathMapper.GetSafeAbsolutePath(clientId, relativePath);
         var chunkDir = _pathMapper.GetSafeAbsolutePath(clientId, Path.Combine("temp", Path.GetDirectoryName(relativePath) ?? string.Empty));
-        var chunkFiles = Directory.GetFiles(chunkDir, Path.GetFileName(relativePath) + ".chunk*")
-            .OrderBy(f => f)
+        var prefix = Path.GetFileName(relativePath) + ".chunk";
+
+        var chunkFiles = Directory.EnumerateFiles(chunkDir, prefix + "*")
+            .Select(path => new
+            {
+                Path = path,
+                Index = ParseChunkIndex(path, prefix)
+            })
+            .OrderBy(x => x.Index)
+            .Select(x => x.Path)
             .ToList();
 
         if (request.ChunkCount > 0 && chunkFiles.Count != request.ChunkCount)
@@ -131,25 +140,45 @@ public class FileSyncService
         _logger.LogInformation("檔案合併完成，Client: {ClientId}，目標檔案: {RelativePath}，大小: {Size} bytes", clientId, relativePath, request.ExpectedSize);
     }
 
+    static int ParseChunkIndex(string fullPath, string prefix)
+    {
+        var name = Path.GetFileName(fullPath); // e.g. "a.pdf.chunk12"
+        var idxPart = name.Substring(prefix.Length); // "12"
+        return int.TryParse(idxPart, out var n) ? n : int.MaxValue;
+    }
+    
     /// <summary>
     /// 執行刪除，僅允許客戶根目錄下的檔案。
+    /// 注意：paths 來自 JSON body，是「相對路徑」，不是 Base64Url。
     /// </summary>
     public void DeleteFiles(string clientId, IEnumerable<string> paths)
     {
         var targetList = paths.ToList();
 
-        foreach (var path in targetList)
+        foreach (var raw in targetList)
         {
-            var target = _pathMapper.GetSafeAbsolutePath(clientId, DecodePath(path));
+            // 1) 統一路徑格式
+            var relative = NormalizePath(raw);
+
+            // 2) 禁止絕對路徑 / UNC
+            if (Path.IsPathRooted(relative))
+                throw new InvalidOperationException("Invalid path.");
+
+            // 3) 禁止 ../ 穿越（用 segment 檢查比較準）
+            var segments = relative.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Any(s => s == ".."))
+                throw new InvalidOperationException("Invalid path.");
+
+            // 4) 終極防線：PathMapper 確保落在 client root 底下
+            var target = _pathMapper.GetSafeAbsolutePath(clientId, relative);
+
             if (File.Exists(target))
-            {
                 File.Delete(target);
-            }
         }
 
         _logger.LogInformation("刪除檔案完成，Client: {ClientId}，檔案數: {Count}", clientId, targetList.Count);
     }
-
+    
     private IEnumerable<FileEntry> EnumerateServerFiles(string root)
     {
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
@@ -167,9 +196,36 @@ public class FileSyncService
 
     private static string NormalizePath(string path) => path.Replace('\\', '/');
 
-    private static string DecodePath(string base64Path)
+    private static string DecodePath(string base64UrlPath)
     {
-        var bytes = Convert.FromBase64String(base64Path);
+        var relative = DecodeBase64UrlToUtf8(base64UrlPath);
+
+        // 統一路徑分隔
+        relative = relative.Replace('\\', '/');
+
+        // 防止絕對路徑/UNC
+        if (Path.IsPathRooted(relative))
+            throw new InvalidOperationException("Invalid path.");
+
+        // 防止 ../ 穿越（用簡單規則 + 交給 GetSafeAbsolutePath 再 double check）
+        if (relative.Contains("..", StringComparison.Ordinal))
+            throw new InvalidOperationException("Invalid path.");
+
+        return relative;
+    }
+
+    private static string DecodeBase64UrlToUtf8(string base64Url)
+    {
+        var s = base64Url.Replace('-', '+').Replace('_', '/');
+        switch (s.Length % 4)
+        {
+            case 2: s += "=="; break;
+            case 3: s += "="; break;
+            case 0: break;
+            default: throw new FormatException("Invalid Base64Url string length.");
+        }
+
+        var bytes = Convert.FromBase64String(s);
         return Encoding.UTF8.GetString(bytes);
     }
 

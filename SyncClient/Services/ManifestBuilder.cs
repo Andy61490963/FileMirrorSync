@@ -25,6 +25,7 @@ public class ManifestBuilder
     {
         var entries = new List<ClientFileEntry>();
 
+        // 遍歷目標資料夾下面的所有物件
         foreach (var path in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
         {
             var info = new FileInfo(path);
@@ -37,6 +38,7 @@ public class ManifestBuilder
                 Sha256 = null
             };
 
+            // 如果 Size + LastWriteTime 都沒變 → 沿用 previous 的 Sha256
             if (previous.TryGetValue(relative, out var prev) && prev.Size == entry.Size && prev.LastWriteTime == entry.LastWriteTime)
             {
                 entry.Sha256 = prev.Sha256;
@@ -57,6 +59,11 @@ public class ManifestBuilder
 
     private static string Normalize(string path) => path.Replace('\\', '/');
 
+    /// <summary>
+    /// 以 path 計算獨立的 sha 256
+    /// </summary>
+    /// <param name="path"></param>
+    /// <returns></returns>
     private static string ComputeSha256(string path)
     {
         using var sha = SHA256.Create();

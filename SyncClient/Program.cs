@@ -37,6 +37,7 @@ public static class Program
 
             Log.Information("同步程序開始，ClientId: {ClientId}, Root: {RootPath}", settings.ClientId, settings.RootPath);
 
+            // 程式入口點
             await runner.RunAsync(cts.Token);
 
             Log.Information("同步完成");
