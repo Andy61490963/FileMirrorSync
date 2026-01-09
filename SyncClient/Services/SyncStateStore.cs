@@ -24,33 +24,33 @@ public class SyncStateStore
     }
 
     /// <summary>
-    /// 載入前一次同步的檔案資訊。
+    /// 載入前一次同步狀態。
     /// </summary>
-    public Dictionary<string, ClientFileEntry> Load()
+    public SyncState Load()
     {
         if (!File.Exists(_stateFile))
         {
             _logger.Information("狀態檔不存在，將建立新的檔案：{File}", _stateFile);
             _logger.Information("CurrentDirectory = {Dir}", Environment.CurrentDirectory);
-            return new Dictionary<string, ClientFileEntry>(StringComparer.OrdinalIgnoreCase);
+            return new SyncState();
         }
 
         var json = File.ReadAllText(_stateFile);
-        var state = JsonSerializer.Deserialize<Dictionary<string, ClientFileEntry>>(json) ?? new Dictionary<string, ClientFileEntry>(StringComparer.OrdinalIgnoreCase);
-        _logger.Information("已載入狀態檔：{File}，筆數：{Count}", _stateFile, state.Count);
+        var state = JsonSerializer.Deserialize<SyncState>(json) ?? new SyncState();
+        _logger.Information("已載入狀態檔：{File}，筆數：{Count}", _stateFile, state.Files.Count);
         return state;
     }
 
     /// <summary>
     /// 儲存最新的檔案狀態。
     /// </summary>
-    public void Save(Dictionary<string, ClientFileEntry> state)
+    public void Save(SyncState state)
     {
         var json = JsonSerializer.Serialize(state, new JsonSerializerOptions
         {
             WriteIndented = true
         });
         File.WriteAllText(_stateFile, json);
-        _logger.Information("狀態檔已更新至 {File}，筆數：{Count}", _stateFile, state.Count);
+        _logger.Information("狀態檔已更新至 {File}，筆數：{Count}", _stateFile, state.Files.Count);
     }
 }

@@ -5,6 +5,6 @@ namespace SyncClient.Models;
 /// </summary>
 public class ManifestDiffResponse
 {
-    public List<string> Upload { get; set; } = new();
+    public List<UploadInstruction> Upload { get; set; } = new();
     public List<string> Delete { get; set; } = new();
 }

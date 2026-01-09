@@ -56,6 +56,9 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// 載入應用程式設定。
+    /// </summary>
     private static IConfigurationRoot LoadConfiguration()
     {
         var config = new ConfigurationBuilder()
@@ -66,6 +69,9 @@ public static class Program
         return config;
     }
 
+    /// <summary>
+    /// 讀取同步設定並綁定至模型。
+    /// </summary>
     private static SyncSettings LoadSettings(IConfiguration configuration)
     {
         var settings = new SyncSettings();

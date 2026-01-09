@@ -1,5 +1,5 @@
 using System.Net.Http.Json;
-using System.Text;
+using System.Security.Cryptography;
 using Serilog;
 using SyncClient.Infrastructure;
 using SyncClient.Models;
@@ -35,14 +35,15 @@ public class SyncRunner
     /// </summary>
     public async Task RunAsync(CancellationToken ct)
     {
-        // 讀回「上次同步時每個檔案的資訊」（Path → Size/LastWriteTime/Sha256）
-        var previous = _stateStore.Load();
-        var files = _manifestBuilder.Build(previous);
+        // 讀回「上次同步狀態」（避免重複計算）
+        _ = _stateStore.Load();
+        var files = _manifestBuilder.Build();
 
         _logger.Information("Manifest 建立完成，共 {Count} 筆項目，開始比對差異", files.Count);
 
         var manifest = new ManifestRequest
         {
+            DatasetId = _settings.DatasetId,
             ClientId = _settings.ClientId,
             Files = files
         };
@@ -52,9 +53,13 @@ public class SyncRunner
         await UploadFilesAsync(diff.Upload, files, ct);
         await DeleteFilesAsync(diff.Delete, ct);
 
-        var newState = files.ToDictionary(f => f.Path, f => f, StringComparer.OrdinalIgnoreCase);
+        var newState = new SyncState
+        {
+            LastSyncUtc = DateTime.UtcNow,
+            Files = files.ToDictionary(f => f.Path, f => f, StringComparer.OrdinalIgnoreCase)
+        };
         _stateStore.Save(newState);
-        _logger.Information("狀態檔已更新，檔案數: {Count}", newState.Count);
+        _logger.Information("狀態檔已更新，檔案數: {Count}", newState.Files.Count);
     }
 
     /// <summary>
@@ -87,132 +92,33 @@ public class SyncRunner
     /// - 若任一 chunk 或 complete 失敗，會直接拋例外終止同步
     /// </summary>
     private async Task UploadFilesAsync(
-        IEnumerable<string> uploadList,
+        IEnumerable<UploadInstruction> uploadList,
         List<ClientFileEntry> files,
         CancellationToken ct)
     {
-        // 逐一處理 Server 要求上傳的檔案（相對路徑）
-        foreach (var relative in uploadList)
+        var lookup = files.ToDictionary(f => f.Path, f => f, StringComparer.OrdinalIgnoreCase);
+        var maxParallel = Math.Max(1, _settings.MaxParallelUploads);
+        using var throttler = new SemaphoreSlim(maxParallel, maxParallel);
+        var tasks = uploadList.Select(async instruction =>
         {
-            // 從本次 manifest 中，找出該檔案的完整描述（Size / Sha256）
-            // 用於後續 complete 階段的完整性驗證
-            var entry = files.First(f =>
-                string.Equals(f.Path, relative, StringComparison.OrdinalIgnoreCase));
-
-            // 將檔案路徑轉成 URL-safe 的 Base64（避免特殊字元破壞 URL）
-            var base64Path = ToBase64Url(relative);
-
-            // 組合實體檔案的完整路徑
-            var filePath = Path.Combine(_settings.RootPath, relative);
-
-            // 以串流方式開啟檔案：
-            // - 不一次載入整個檔案（支援大檔）
-            // - FileShare.Read 避免其他程式寫入，確保內容穩定
-            using var stream = new FileStream(
-                filePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read);
-
-            // 計算此檔案總共會被切成多少個 chunk
-            // Server 會在 complete 階段驗證是否有漏傳 chunk
-            var totalChunks = (int)Math.Ceiling(
-                (double)stream.Length / _settings.ChunkSize);
-
-            // 建立可重複使用的 buffer，避免每個 chunk 都 new byte[]
-            var buffer = new byte[_settings.ChunkSize];
-
-            // Chunk 序號（0-based，與 Server API 契約一致）
-            var index = 0;
-            int read;
-
-            // 逐 chunk 讀取並上傳
-            while ((read = await stream.ReadAsync(
-                buffer, 0, buffer.Length, ct)) > 0)
+            await throttler.WaitAsync(ct);
+            try
             {
-                // 只包裝實際讀到的資料長度（最後一塊可能 < ChunkSize）
-                using var content = new ByteArrayContent(buffer, 0, read);
-
-                // Chunk 上傳 API：
-                // - base64Path：檔案識別
-                // - index：chunk 序號
-                // - clientId：區分不同 Client
-                var url = $"api/sync/files/{base64Path}/chunks/{index}?clientId={_settings.ClientId}";
-                var resp = await _httpClient.PutAsync(url, content, ct);
-
-                // 若上傳失敗，先記錄完整錯誤資訊，再丟出例外中斷同步
-                if (!resp.IsSuccessStatusCode)
+                if (!lookup.TryGetValue(instruction.Path, out var entry))
                 {
-                    var body = await resp.Content.ReadAsStringAsync(ct);
-
-                    _logger.Error(
-                        "Upload failed. Status={StatusCode} Url={Url} Body={Body}",
-                        (int)resp.StatusCode,
-                        resp.RequestMessage?.RequestUri?.ToString(),
-                        body
-                    );
-
-                    // 丟出例外，讓外層流程決定是否重試或終止
-                    resp.EnsureSuccessStatusCode();
+                    _logger.Warning("找不到檔案項目，略過上傳 Path={Path}", instruction.Path);
+                    return;
                 }
 
-                // 單一 chunk 上傳成功的紀錄（人類可讀的 1-based 序號）
-                _logger.Information(
-                    "上傳 chunk 成功，檔案: {File}，序號: {Index}/{Total}",
-                    relative, index + 1, totalChunks);
-
-                // 移動到下一個 chunk
-                index++;
+                await UploadSingleFileAsync(entry, instruction, ct);
             }
-
-            // 所有 chunk 上傳完成後，呼叫 complete API
-            // 由 Server 驗證檔案是否完整且內容正確
-            var completeRequest = new CompleteUploadRequest
+            finally
             {
-                ClientId = _settings.ClientId,
-
-                // 預期檔案大小，用於防止截斷或多寫
-                ExpectedSize = entry.Size,
-
-                // 檔案內容雜湊，用於最終內容一致性驗證
-                Sha256 = entry.Sha256,
-
-                // 預期 chunk 數量，用於檢查是否有漏傳
-                ChunkCount = totalChunks
-            };
-
-            var resp1 = await _httpClient.PostAsJsonAsync(
-                $"api/sync/files/{base64Path}/complete",
-                completeRequest,
-                ct);
-
-            // Complete 階段失敗，同樣視為同步失敗
-            if (!resp1.IsSuccessStatusCode)
-            {
-                var body = await resp1.Content.ReadAsStringAsync(ct);
-
-                _logger.Error(
-                    "Upload failed. Status={StatusCode} Url={Url} Body={Body}",
-                    (int)resp1.StatusCode,
-                    resp1.RequestMessage?.RequestUri?.ToString(),
-                    body
-                );
-
-                resp1.EnsureSuccessStatusCode();
+                throttler.Release();
             }
+        }).ToList();
 
-            // 此檔案已完整上傳並通過 Server 驗證
-            _logger.Information("檔案上傳完成並驗證，檔案: {File}", relative);
-        }
-    }
-
-    private static string ToBase64Url(string input)
-    {
-        var bytes = Encoding.UTF8.GetBytes(input);
-        var base64 = Convert.ToBase64String(bytes);
-
-        // Base64Url: '+' -> '-', '/' -> '_', 去掉 '=' padding
-        return base64.Replace('+', '-').Replace('/', '_').TrimEnd('=');
+        await Task.WhenAll(tasks);
     }
     
     /// <summary>
@@ -220,6 +126,12 @@ public class SyncRunner
     /// </summary>
     private async Task DeleteFilesAsync(IEnumerable<string> deleteList, CancellationToken ct)
     {
+        if (!_settings.EnableDelete)
+        {
+            _logger.Information("刪除同步已停用，忽略 delete 清單");
+            return;
+        }
+
         if (!deleteList.Any())
         {
             _logger.Information("無檔案需要刪除");
@@ -228,12 +140,85 @@ public class SyncRunner
 
         var request = new DeleteRequest
         {
+            DatasetId = _settings.DatasetId,
             ClientId = _settings.ClientId,
-            Paths = deleteList.ToList()
+            Paths = deleteList.ToList(),
+            DeletedAtUtc = DateTime.UtcNow
         };
 
         var response = await _httpClient.PostAsJsonAsync("api/sync/delete", request, ct);
         response.EnsureSuccessStatusCode();
         _logger.Information("刪除請求已完成，共刪除 {Count} 筆", request.Paths.Count);
+    }
+
+    /// <summary>
+    /// 上傳單一檔案並在 Complete 階段驗證。
+    /// </summary>
+    private async Task UploadSingleFileAsync(ClientFileEntry entry, UploadInstruction instruction, CancellationToken ct)
+    {
+        var relative = entry.Path;
+        var base64Path = PathEncoding.EncodeBase64Url(relative);
+        var filePath = Path.Combine(_settings.RootPath, relative);
+
+        using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var totalChunks = (int)Math.Ceiling((double)stream.Length / _settings.ChunkSize);
+        var buffer = new byte[_settings.ChunkSize];
+        var index = 0;
+        int read;
+
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+        while ((read = await stream.ReadAsync(buffer, 0, buffer.Length, ct)) > 0)
+        {
+            hasher.AppendData(buffer, 0, read);
+
+            using var content = new ByteArrayContent(buffer, 0, read);
+            var url =
+                $"api/sync/files/{base64Path}/uploads/{instruction.UploadId}/chunks/{index}?datasetId={_settings.DatasetId}&clientId={_settings.ClientId}";
+            var resp = await _httpClient.PutAsync(url, content, ct);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                _logger.Error(
+                    "Upload failed. Status={StatusCode} Url={Url} Body={Body}",
+                    (int)resp.StatusCode,
+                    resp.RequestMessage?.RequestUri?.ToString(),
+                    body);
+                resp.EnsureSuccessStatusCode();
+            }
+
+            _logger.Information("上傳 chunk 成功，檔案: {File}，序號: {Index}/{Total}", relative, index + 1, totalChunks);
+            index++;
+        }
+
+        var hash = Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
+        var completeRequest = new CompleteUploadRequest
+        {
+            DatasetId = _settings.DatasetId,
+            ClientId = _settings.ClientId,
+            ExpectedSize = entry.Size,
+            Sha256 = hash,
+            ChunkCount = totalChunks,
+            LastWriteUtc = entry.LastWriteUtc
+        };
+
+        var completeResponse = await _httpClient.PostAsJsonAsync(
+            $"api/sync/files/{base64Path}/uploads/{instruction.UploadId}/complete",
+            completeRequest,
+            ct);
+
+        if (!completeResponse.IsSuccessStatusCode)
+        {
+            var body = await completeResponse.Content.ReadAsStringAsync(ct);
+            _logger.Error(
+                "Upload failed. Status={StatusCode} Url={Url} Body={Body}",
+                (int)completeResponse.StatusCode,
+                completeResponse.RequestMessage?.RequestUri?.ToString(),
+                body);
+            completeResponse.EnsureSuccessStatusCode();
+        }
+
+        _logger.Information("檔案上傳完成並驗證，檔案: {File}", relative);
     }
 }

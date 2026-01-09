@@ -21,7 +21,11 @@ try
     builder.Services.Configure<AppLoggingOptions>(builder.Configuration.GetSection(AppLoggingOptions.SectionName));
     builder.Services.AddSingleton<ApiKeyValidator>();
     builder.Services.AddSingleton<PathMapper>();
-    builder.Services.AddSingleton<FileSyncService>();
+    builder.Services.AddSingleton<UploadSessionService>();
+    builder.Services.AddSingleton<VersionPolicy>();
+    builder.Services.AddSingleton<ManifestDiffService>();
+    builder.Services.AddSingleton<FileMergeService>();
+    builder.Services.AddSingleton<DeleteService>();
     builder.Services.AddControllers();
 
     var app = builder.Build();

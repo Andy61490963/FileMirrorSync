@@ -1,43 +1,117 @@
-# FileMirrorSync 架構說明
+# FileMirrorSync 架構與流程說明
 
-本文描述 HTTP-based 檔案鏡像同步（類似 rsync mirror）的 Server 與 Client 範例，以及 Manifest Diff 的核心演算法。
+本文描述「檔案鏡像同步系統」的 Server / Client 參考實作重點與設計考量。
 
-## Server（ASP.NET Core Web API）
-- 路由：`/api/sync/*`，強制 HTTPS。
-- 認證：Header `X-Api-Key`，依 `clientId` 對應。
-- 儲存：`Storage.InboundRoot` 作為鏡像根目錄（每個 clientId 一個子資料夾），`Storage.TempRoot` 作為 chunk 暫存。
-- 路徑安全：所有相對路徑經 `Path.GetFullPath` 確認後，必須位於對應的 client 根目錄內，拒絕 `..`、絕對路徑與 UNC。
-- 上傳流程：
-  1. Client 呼叫 `POST /api/sync/manifest`，Server 透過 `FileSyncService.Diff` 計算差異，回傳需上傳與刪除的清單。
-  2. 對於需上傳的檔案，Client 以 `PUT /api/sync/files/{base64Path}/chunks/{index}?clientId=` 送出 8MB chunk，Server 直接覆寫暫存 chunk 檔，支援重送。
-  3. 上傳完畢後呼叫 `POST /api/sync/files/{base64Path}/complete`，Server 驗證 chunk 數量、檔案大小與 Hash，最後以原子 Move 取代正式檔並清除 chunk。
-  4. 對需刪除的檔案呼叫 `POST /api/sync/delete`，Server 僅刪除鏡像根目錄內的目標。
+## 1. 架構概觀
+- **Server（ASP.NET Core Web API）**
+  - API 路徑：`/api/sync/*`
+  - 認證：Header `X-Api-Key`，綁定 `datasetId` 或 `clientId`
+  - 儲存：`InboundRoot/{datasetId}` 作為資料集根目錄
+  - 暫存：`TempRoot/{datasetId}/{uploadId}` 作為 chunk 暫存
+- **Client（Console App）**
+  - 透過 manifest 回報本機檔案清單
+  - 依差異結果執行 chunk upload + complete
+  - 本地狀態儲存在 JSON（`sync-state.json`）
 
-## Client（C# Console）
-- 掃描設定的根目錄，產生 manifest（`path`、`size`、`lastWriteUtc`，若檔案有變動才重新計算 `sha256`）。
-- 將 manifest 送到 Server，依差異結果逐檔分 chunk 上傳並完成驗證，最後發送刪除請求同步鏡像。
-- 透過 JSON 檔案保存前一次同步狀態，避免重複計算 Hash；Chunk 上傳採 `HttpClient` 可重送策略。
+## 2. ClientScope / Dataset 設計
+支援兩種模式並使用相同程式碼：
+1. **Multi-Client → One Dataset**
+   - 多台 Client 使用相同 `DatasetId`
+   - Server 實體路徑為 `InboundRoot/{DatasetId}/...`
+2. **One Client → One Dataset**
+   - 每台 Client 使用不同 `DatasetId`
+   - Server 仍採 `InboundRoot/{DatasetId}/...`
 
-## Manifest Diff 核心演算法
-1. 將 Client 與 Server 的檔案清單以路徑為 key 建立字典（忽略大小寫）。
-2. 對於 Client 端的每個檔案：
-   - 若 Server 沒有該路徑 → 加入 `upload` 清單。
-   - 若 `size` 或 `lastWriteUtc` 不同 → 加入 `upload` 清單。
-   - 若提供 `sha256` 且與 Server 不同 → 加入 `upload` 清單。
-3. `delete` 清單 = Server 檔案集合減去 Client 檔案集合（路徑差集）。
-4. 複雜度：
-   - 時間：O(n)，以字典查找為主；適合大量小檔案。
-   - 空間：O(n)，儲存字典以快速比對。可透過串流列舉與分批處理降低峰值記憶體。
+## 3. 核心流程
+1. **Manifest 比對**
+   - Client 送出：`DatasetId`、`ClientId`、檔案清單（`path`、`size`、`lastWriteUtc`）
+   - Server 透過 `ManifestDiffService` 建立差異
+   - 回傳：
+     - `upload[]`：每筆包含 `path` + `uploadId`
+     - `delete[]`：僅在 LWW 刪除策略下回傳
+2. **Chunk Upload**
+   - Client 將檔案切成固定大小 `ChunkSize`
+   - URL：`/api/sync/files/{base64Path}/uploads/{uploadId}/chunks/{index}`
+3. **Complete**
+   - Client 上傳完所有 chunk 後呼叫 complete
+   - Server 合併 chunk、驗證 size/sha256
+   - LWW 規則：
+     - 若 Server 版本較新 → 忽略（回 204）
+     - 若 Client 較新 → 原子替換並設定 `LastWriteTimeUtc`
+4. **Delete（鏡像刪除）**
+   - DeleteDisabled：不允許刪除（預設）
+   - LwwDelete：需 `DeletedAtUtc > LastWriteTimeUtc` 才刪除
 
-## Bug 預防與重構建議
-- **路徑安全**：所有外來路徑統一透過 `PathMapper.GetSafeAbsolutePath` 處理，避免遺漏檢查。
-- **Chunk 清理**：`CompleteUploadAsync` 成功後清除所有 chunk，並在驗證失敗時刪除暫存檔避免累積垃圾。
-- **Hash 計算成本**：僅在 `size` 或 `lastWriteUtc` 變更時重算；狀態檔記錄 hash，避免每次全量計算。
-- **可測性**：服務層為純邏輯，便於以單元測試覆蓋 Diff 與路徑驗證。未來可將 chunk 儲存抽象化以支援雲端儲存。
-- **可重用性**：`SyncRunner`、`ManifestBuilder`、`FileSyncService` 皆為可注入的獨立元件，方便改為 Windows Service 或 WebJob 執行。
+## 4. Manifest Diff 演算法與比較
+### 4.1 採用演算法（Dictionary 比對）
+- **時間複雜度**：O(N)  
+- **空間複雜度**：O(N)  
+- **優點**：
+  - 適合大量檔案
+  - 避免 nested loops 的 O(N²)
+  - 以 path 作 key，符合檔案 identity
 
-## Logging 與可觀測性
-- Server 與 Client 均使用 Serilog，啟動時先建立 Console bootstrap logger，再依 `AppLogging` 設定決定最低層級、檔案與 Seq Sink。
-- 檔案 Sink 以每日滾動檔案與大小上限控制體積，失敗時會寫入 `serilog-selflog.txt` 自我診斷。
-- 主要業務流程（Manifest 比對、chunk 上傳、合併、刪除、狀態檔存取）皆有資訊層級紀錄；Hash 重用與重算則以 Debug/Information 區分成本與行為。
-- 設定檔自訂：`AppLogging.ApplicationName` 用於標記來源，`File` 與 `Seq` 區段可獨立啟用/停用並調整保留天數與傳送週期。
+### 4.2 替代方案
+1. **排序後雙指標比對**
+   - 時間複雜度：O(N log N)
+   - 空間：O(1) 或 O(N)
+   - 優點：記憶體較低，但排序成本高
+2. **增量掃描（上次狀態 diff）**
+   - 需維護完整 state，實作較複雜
+   - 適合超大量檔案、低變動率情境
+
+## 5. 併發與競態處理
+- Upload Session 以 `uploadId` 綁定相對路徑，避免 chunk 混寫
+- `FileMergeService` 以 `ConcurrentDictionary<string, SemaphoreSlim>` 進行 per-path lock
+- 避免兩個 Client 同時 complete 覆蓋同一檔案
+
+## 6. 安全性
+- 路徑驗證：
+  - 禁止絕對路徑 / UNC
+  - 禁止 `..` 路徑穿越
+  - 檔名非法字元檢查
+- API Key 驗證：
+  - 可依 `datasetId` 或 `clientId` 綁定
+  - 未授權請求一律拒絕
+
+## 7. 潛在 Bug 與防護
+- **Chunk 遺失/重送**：Complete 會驗證 `chunkCount` 與 size
+- **舊版覆蓋新版**：LWW 比對 `LastWriteUtc`，舊版直接忽略
+- **路徑穿越**：PathMapper 進行雙層檢核（相對路徑 + root boundary）
+- **刪除誤判**：
+  - Multi-Client 環境預設禁止刪除
+  - LWW Delete 需 `DeletedAtUtc` 才允許
+
+## 8. 可重用性與模組化
+- PathMapper、ManifestDiffService、UploadSessionService、FileMergeService、VersionPolicy 各自單一責任
+- 易於替換儲存介面（例如改為雲端 Blob）
+- Client 可擴充為 Worker Service / Windows Service
+
+## 9. 可行的 Refactor
+1. **抽象 IStorageProvider**
+   - 支援本機/雲端儲存切換
+2. **Chunk 清理 Background Service**
+   - 定期清理過期 upload session
+3. **Manifest 分頁/增量**
+   - 減少超大規模同步時的記憶體負載
+
+## 10. 設定示例
+### 10.1 Multi-Client → One Dataset
+```json
+// Client appsettings.json
+{
+  "DatasetId": "pdf-dataset",
+  "ClientId": "pc-001",
+  "ApiKey": "demo-secret-key"
+}
+```
+
+### 10.2 One Client → One Dataset
+```json
+// Client appsettings.json
+{
+  "DatasetId": "pc-001",
+  "ClientId": "pc-001",
+  "ApiKey": "demo-secret-key"
+}
+```

@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using Serilog;
 using SyncClient.Models;
 
@@ -19,9 +18,9 @@ public class ManifestBuilder
     }
 
     /// <summary>
-    /// 建立最新 manifest，並依狀態判斷是否需要重算 Hash。
+    /// 建立最新 manifest，僅提供大小與最後修改時間。
     /// </summary>
-    public List<ClientFileEntry> Build(Dictionary<string, ClientFileEntry> previous)
+    public List<ClientFileEntry> Build()
     {
         var entries = new List<ClientFileEntry>();
 
@@ -34,21 +33,9 @@ public class ManifestBuilder
             {
                 Path = relative,
                 Size = info.Length,
-                LastWriteTime = info.LastWriteTime,
+                LastWriteUtc = info.LastWriteTimeUtc,
                 Sha256 = null
             };
-
-            // 如果 Size + LastWriteTime 都沒變 → 沿用 previous 的 Sha256
-            if (previous.TryGetValue(relative, out var prev) && prev.Size == entry.Size && prev.LastWriteTime == entry.LastWriteTime)
-            {
-                entry.Sha256 = prev.Sha256;
-                _logger.Debug("沿用既有 Hash，檔案: {File}", relative);
-            }
-            else
-            {
-                entry.Sha256 = ComputeSha256(path);
-                _logger.Information("重新計算 Hash，檔案: {File}", relative);
-            }
 
             entries.Add(entry);
         }
@@ -57,18 +44,8 @@ public class ManifestBuilder
         return entries;
     }
 
-    private static string Normalize(string path) => path.Replace('\\', '/');
-
     /// <summary>
-    /// 以 path 計算獨立的 sha 256
+    /// 統一路徑分隔符號。
     /// </summary>
-    /// <param name="path"></param>
-    /// <returns></returns>
-    private static string ComputeSha256(string path)
-    {
-        using var sha = SHA256.Create();
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var hash = sha.ComputeHash(stream);
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
+    private static string Normalize(string path) => path.Replace('\\', '/');
 }
